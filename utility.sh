@@ -1072,15 +1072,16 @@ function create_pki_credentials() {
   local dir="$1"; shift
   local region="$1"; shift
   local account="$1"; shift
+  local provider="${1:-aws}"; shift
 
-  if [[ (! -f "${dir}/aws-ssh-crt.pem") &&
-        (! -f "${dir}/aws-ssh-prv.pem") &&
-        (! -f "${dir}/.aws-ssh-crt.pem") &&
-        (! -f "${dir}/.aws-ssh-prv.pem") &&
-        (! -f "${dir}/.aws-${account}-${region}-ssh-crt.pem") &&
-        (! -f "${dir}/.aws-${account}-${region}-ssh-prv.pem") ]]; then
-      openssl genrsa -out "${dir}/.aws-${account}-${region}-ssh-prv.pem.plaintext" 2048 || return $?
-      openssl rsa -in "${dir}/.aws-${account}-${region}-ssh-prv.pem.plaintext" -pubout > "${dir}/.aws-${account}-${region}-ssh-crt.pem" || return $?
+  if [[ (! -f "${dir}/${provider}-ssh-crt.pem") &&
+        (! -f "${dir}/${provider}-ssh-prv.pem") &&
+        (! -f "${dir}/.${provider}-ssh-crt.pem") &&
+        (! -f "${dir}/.${provider}-ssh-prv.pem") &&
+        (! -f "${dir}/.${provider}-${account}-${region}-ssh-crt.pem") &&
+        (! -f "${dir}/.${provider}-${account}-${region}-ssh-prv.pem") ]]; then
+      openssl genrsa -out "${dir}/.${provider}-${account}-${region}-ssh-prv.pem.plaintext" 2048 || return $?
+      openssl rsa -in "${dir}/.${provider}-${account}-${region}-ssh-prv.pem.plaintext" -pubout > "${dir}/.${provider}-${account}-${region}-ssh-crt.pem" || return $?
   fi
 
   if [[ ! -f "${dir}/.gitignore" ]]; then
@@ -1098,11 +1099,12 @@ function delete_pki_credentials() {
   local dir="$1"; shift
   local region="$1"; shift
   local account="$1"; shift
+  local provider="${1:-aws}"; shift
 
   local restore_nullglob="$(shopt -p nullglob)"
   shopt -s nullglob
 
-  rm -f "${dir}"/.aws-${account}-${region}-ssh-crt* "${dir}"/.aws-${account}-${region}-ssh-prv*
+  rm -f "${dir}"/.${provider}-${account}-${region}-ssh-crt* "${dir}"/.${provider}-${account}-${region}-ssh-prv*
 
   ${restore_nullglob}
 }
@@ -1112,32 +1114,84 @@ function delete_pki_credentials() {
 function check_ssh_credentials() {
   local region="$1"; shift
   local name="$1"; shift
+  local provider="${1:-aws}"; shift
 
-  aws --region "${region}" ec2 describe-key-pairs --key-name "${name}" > /dev/null 2>&1
+  case ${provider} in
+    aws)
+      aws --region "${region}" ec2 describe-key-pairs --key-name "${name}" > /dev/null 2>&1
+      ;;
+    azure)
+      #azure should be passed the Key Id as the name
+      az keyvault key show --id "${name}" 2>&1 > /dev/null
+      ;;
+    *)
+      fatal "Provider unsupported: ${provider}"
+      ;;
+  esac
 }
 
 function show_ssh_credentials() {
   local region="$1"; shift
   local name="$1"; shift
+  local provider="${1:-aws}"; shift
 
-  aws --region "${region}" ec2 describe-key-pairs --key-name "${name}"
+
+  case ${provider} in
+    aws)
+      aws --region "${region}" ec2 describe-key-pairs --key-name "${name}"
+      ;;
+    azure)
+      #azure should be passed the Key Id as the name
+      az keyvault key show --id "${name}"
+      ;;
+    *)
+      fatal "Provider unsupported: ${provider}"
+      ;;
+  esac
 }
 
 function update_ssh_credentials() {
   local region="$1"; shift
   local name="$1"; shift
   local crt_file="$1"; shift
+  local provider="${1:-aws}"; shift
 
-  local crt_content=$(dos2unix < "${crt_file}" | awk 'BEGIN {RS="\n"} /^[^-]/ {printf $1}')
-  aws --region "${region}" ec2 import-key-pair --key-name "${name}" --public-key-material "${crt_content}"
+  case ${provider} in
+    aws)
+      local crt_content=$(dos2unix < "${crt_file}" | awk 'BEGIN {RS="\n"} /^[^-]/ {printf $1}')
+      aws --region "${region}" ec2 import-key-pair --key-name "${name}" --public-key-material "${crt_content}"
+      ;;
+    azure)
+      #azure should be passed the Keyvault Name as name as the name
+      ${crt_content} > ${crt_file}
+      az keyvault key import --pem-file "${crt_file}" --vault-name "${name}" --name "${name}-ssh"
+      ;;
+    *)
+      fatal "Provider unsupported: ${provider}"
+      ;;
+  esac
 }
 
 function delete_ssh_credentials() {
   local region="$1"; shift
   local name="$1"; shift
+  local provider="${1:-aws}"; shift
 
-  aws --region "${region}" ec2 describe-key-pairs --key-name "${name}" > /dev/null 2>&1 && \
-    { aws --region "${region}" ec2 delete-key-pair --key-name "${name}" || return $?; }
+  case ${provider} in
+    aws)
+      aws --region "${region}" ec2 describe-key-pairs --key-name "${name}" > /dev/null 2>&1 && \
+      { aws --region "${region}" ec2 delete-key-pair --key-name "${name}" || return $?; }
+      ;;
+    azure)
+      #azure should be passed the Key Id as the name
+      #azure returns a full object upon successful deletion, so we redirect that.
+      az keyvault key show --id "${name}" 2>&1 > /dev/null && \
+      { az keyvault key delete --id "${name}" > /dev/null || return $?; }
+      ;;
+    *)
+      fatal "Provider unsupported: ${provider}"
+      ;;
+  esac
 
   return 0
 }
